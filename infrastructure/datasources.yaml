@@ -1,0 +1,42 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: All data sources for the GraphQL endpoint
+
+Parameters:
+  ApiId:
+    Type: String
+  ServiceRoleArn:
+    Type: String
+  FDHSKUs:
+    Type: String
+
+Resources:    
+ 
+  FDHSKUsDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: 
+        Ref: ApiId
+      Name: FDHSKUsTable
+      Description: This table stores uploaded variants
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn:
+        Ref: ServiceRoleArn
+      DynamoDBConfig:
+        TableName: 
+          Ref: FDHSKUs
+        AwsRegion:
+          Ref: AWS::Region
+
+
+## Here are the settings for the functions in order to assemble a pipeline
+
+  FunctionsNestedStack:
+   Type: AWS::Serverless::Application
+   Properties:
+     Location: functions.yaml
+     Parameters:
+       ApiId: 
+         Ref: ApiId
+       FDHSKUsDataSource:
+         Fn::GetAtt: [FDHSKUsDataSource, Name]

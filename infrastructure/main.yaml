@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: GraphQL endpoint
+
+Parameters:
+  APIName:
+    Type: String
+    Description: The name of the api
+    MinLength: 3
+    MaxLength: 30
+  APIStage:
+    Type: String
+    Description: The stage of the api
+    MinLength: 3
+    MaxLength: 20
+  SuperAdminEmail:
+    Type: String
+    Description: The email of the super admin cognito pool
+    Default: name@domain.com
+  S3BucketNameForFileUpload:
+    Type: String
+    Description: S3 bucket name for file uploads that should be processed by lambda
+
+Globals:
+  Function:
+    Runtime: nodejs8.10
+    Timeout: 3
+    MemorySize: 128
+    Environment:
+      Variables:
+        UPLOAD_BUCKET_NAME:
+          Fn::Sub:
+            - ${_bucketname}-${APIStage}
+            - {_bucketname: {Ref: S3BucketNameForFileUpload}, APIStage: {Ref: APIStage}}
+        TABLE_NAME_SKUs:
+          Ref: FDHProducers
+
+Resources:
+
+  FDHSKUs:
+    Type: AWS::DynamoDB::Table
+    Description: Storage for SKUs
+    Properties:
+      TableName:
+        Fn::Sub:
+          - FDHSKUs-${APIStage}
+          - {APIStage: {Ref: APIStage}}
+      AttributeDefinitions:
+        - AttributeName: productId
+          AttributeType: S
+        - AttributeName: skuId
+          AttributeType: S
+        - AttributeName: variantId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: productId
+          KeyType: HASH
+        - AttributeName: skuId
+          KeyType: RANGE
+      GlobalSecondaryIndexes: 
+        - IndexName: variantId-index
+          KeySchema: 
+            - AttributeName: variantId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: productId-variantId-index
+          KeySchema: 
+            - AttributeName: productId
+              KeyType: HASH
+            - AttributeName: variantId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+  
+    BillingMode: PAY_PER_REQUEST
+
+  FileUploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 
+        Fn::Sub:
+          - ${_bucketname}-${APIStage}
+          - {_bucketname: {Ref: S3BucketNameForFileUpload}, APIStage: {Ref: APIStage}}
+      
+  FDHUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: 
+        Fn::Sub:
+          - ${APIName}-${APIStage}
+          - {APIName: {Ref: APIName}, APIStage: {Ref: APIStage}}
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      UserPoolTags:
+        Name: Name
+        Value: 
+          Fn::Sub:
+            - ${APIName}-${APIStage}
+            - {APIName: {Ref: APIName}, APIStage: {Ref: APIStage}}
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+  
+  FDHPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: 
+        Ref: FDHUserPool
+
+  SuperAdminUser:
+    Type: AWS::Cognito::UserPoolUser
+    Properties:
+      DesiredDeliveryMediums:
+        - EMAIL
+      Username: 
+        Ref: SuperAdminEmail
+      UserAttributes:
+        - Name: email
+          Value: 
+            Ref: SuperAdminEmail
+      UserPoolId: 
+        Ref: FDHUserPool
+
+  DynamoDBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 
+        Fn::Sub:
+          - ${APIName}-dynamodb-role-${APIStage}
+          - {APIName:{Ref: APIName}, APIStage: {Ref: APIStage}}
+      ManagedPolicyArns: 
+        - Ref: AppSyncDynamoDBPolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: 
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - appsync.amazonaws.com
+    DependsOn: 
+      - AppSyncDynamoDBPolicy
+
+  AppSyncDynamoDBPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Manages policy to allo AppSync to query DynamoDB
+      Path: /fdh-appsync/
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+              - dynamodb:UpdateItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:BatchGetItem
+              - dynamodb:BatchWriteItem
+            Resource:
+              - Fn::GetAtt: [FDHSKUs, Arn]
+              - Fn::Join:
+                  - ''
+                  - - Fn::GetAtt: [FDHSKUs, Arn]
+                    - '/index/*'
+  
+  FDHAppSyncAPI:
+    Type: AWS::AppSync::GraphQLApi
+    Description: GraphQL API endpoint 
+    Properties:
+      AuthenticationType: AMAZON_COGNITO_USER_POOLS
+      Name: 
+        Fn::Sub:
+          - ${APIName}-${APIStage}
+          - {APIName:{Ref: APIName}, APIStage: {Ref: APIStage}}
+      UserPoolConfig:
+        UserPoolId: 
+          Ref: FDHUserPool
+        AwsRegion: 
+          Ref: AWS::Region
+        DefaultAction: ALLOW
+
+  FDHAppSyncSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Description: AppSync schema
+    Properties:
+      ApiId: 
+        Fn::GetAtt: [FDHAppSyncAPI, ApiId]
+      DefinitionS3Location: ../graphql/schema/schema.graphql
+
+## Nested stack for data sources and functions
+  DataSourcesNestedStack:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: datasources.yaml
+      Parameters:
+        ApiId:
+          Fn::GetAtt: [FDHAppSyncAPI, ApiId]
+        ServiceRoleArn:
+          Fn::GetAtt: [DynamoDBRole, Arn]
+        FDHSKUs:
+          Ref: FDHSKUs

@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: All resolvers for the GraphQL endpoint
+
+Parameters:
+  ApiId:
+    Type: String
+  AuthenticationFunction:
+    Type: String
+  MutationAuthenticationFunction:
+    Type: String
+  PublishSKUVersionFunction:
+    Type: String
+  SKUFunction:
+    Type: String
+  SKUListFunction:
+    Type: String
+
+Resources:
+
+  SKUResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: 
+        Ref: ApiId
+      TypeName: Query
+      FieldName: SKU
+      RequestMappingTemplate: "{}"
+      ResponseMappingTemplate: |
+        #set($userPermissions = $context.stash.userPermissions)
+        #set($item = $context.result)
+        #set($hasPremissions = false)
+
+        #foreach( $permission in $userPermissions)
+          #if( $permission.resourceId == "*" || $permission.resourceId == $item.producerId )
+              #set($hasPremissions = true)
+            #end
+        #end
+
+        #if( $hasPremissions )
+            $util.toJson($context.result)
+            #else
+            $util.unauthorized()
+        #end
+      Kind: PIPELINE
+      PipelineConfig:
+        Functions:
+          - Ref: AuthenticationFunction
+          - Ref: SKUFunction
+
+  SKUListResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: 
+        Ref: ApiId
+      TypeName: Query
+      FieldName: SKUList
+      RequestMappingTemplate: "{}"
+      ResponseMappingTemplate: |
+        #set($userPermissions = $context.stash.userPermissions)
+        #set($items = $context.result.items)
+        #set($hasPremissions = false)
+
+        #foreach( $permission in $userPermissions)
+          #if( $permission.resourceId == "*")
+              #set($hasPremissions = true) 
+            #end
+            #foreach( $item in $items )
+              #if($item.producerId == $permission.resourceId)
+                  #set($hasPremissions = true)
+                #end
+            #end
+        #end
+
+        #if( $hasPremissions )
+            $util.toJson($context.result)
+            #else
+            $util.unauthorized()
+        #end
+      Kind: PIPELINE
+      PipelineConfig:
+        Functions:
+          - Ref: AuthenticationFunction
+          - Ref: SKUListFunction
+
+  PublishSKUVersionResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: 
+        Ref: ApiId
+      TypeName: Mutation
+      FieldName: publishSKUVersion
+      RequestMappingTemplate: "{}"
+      ResponseMappingTemplate: "$util.toJson($ctx.result)"
+      Kind: PIPELINE
+      PipelineConfig:
+        Functions:
+          - Ref: MutationAuthenticationFunction
+          - Ref: GetStatusFromSKUEntryFunction
+          - Ref: PublishSKUVersionFunction

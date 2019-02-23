@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: All functions for the GraphQL endpoint
+
+Parameters:
+  ApiId:
+    Type: String
+  FDHSKUsDataSource:
+    Type: String
+  FDHUserTableDataSource:
+    Type: String
+    
+Resources:
+   
+  PublishSKUVersionFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties:
+      ApiId: 
+        Ref: ApiId
+      DataSourceName: 
+        Ref: FDHSKUsDataSource
+      Name: PublishSKUVersionFuncton
+      FunctionVersion: 2018-05-29
+      RequestMappingTemplate: |
+        #set($skuId = $context.arguments.input.skuId )
+        #set($productId = $context.arguments.input.productId)
+        #set($version = $context.arguments.input.version)
+        #set($dealerId = $context.arguments.input.dealerId)
+        #set($status = $context.stash.skuObject.status)
+        #set($mapIf = {})
+        #set($mapElse = {})
+        #set($statusList = [])
+
+        #foreach( $statusEntry in $status )
+          #if($statusEntry.status == "Published" && $statusEntry.dealerId == $dealerId)    	
+              #set($mapIf = {
+                "dealerId": $statusEntry.dealerId,
+                "status": "Depublished",
+                "version": $statusEntry.version
+                })
+              $util.qr($statusList.add($mapIf))
+            #elseif($statusEntry.status == "Depublished" && $statusEntry.dealerId == $dealerId)
+            #set($mapElse = {
+                "dealerId": $statusEntry.dealerId,
+                "status": $statusEntry.status,
+                "version": $statusEntry.version
+                })
+              $util.qr($statusList.add($mapElse))
+            #end
+        #end
+
+        #set($map = {
+          "dealerId": $dealerId,
+            "status": "Published",
+            "version": $version
+        })
+
+
+
+        $util.qr($statusList.add($map))
+        {
+            "version" : "2017-02-28",
+            "operation" : "UpdateItem",
+            "key": {
+              "productId": $util.dynamodb.toDynamoDBJson($productId),
+                "skuId" : $util.dynamodb.toDynamoDBJson($skuId)
+            },
+            "update" : {
+                "expression": "SET #st = :ls",
+                "expressionNames": {
+                  "#st": "status"
+                },
+                "expressionValues" : {
+                ":ls": $util.dynamodb.toListJson($statusList)
+            }
+          }
+        }
+      ResponseMappingTemplate: |
+        ## Raise a GraphQL field error in case of a datasource invocation error
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        ## Pass back the result from DynamoDB. **
+        $util.toJson($ctx.result)
+
+  SKUFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties:
+      ApiId: 
+        Ref: ApiId
+      DataSourceName: 
+        Ref: FDHSKUsDataSource
+      Name: SKUFunction
+      FunctionVersion: 2018-05-29
+      RequestMappingTemplate: |
+        #set($productId = $context.arguments.productId)
+        #set($skuId = $context.arguments.skuId)
+        {
+            "operation": "GetItem",
+            "key": {
+                "productId": $util.dynamodb.toDynamoDBJson($productId),
+                "skuId": $util.dynamodb.toDynamoDBJson($skuId)
+            }
+        }
+      ResponseMappingTemplate: |
+        ## Raise a GraphQL field error in case of a datasource invocation error
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        ## Pass back the result from DynamoDB. **
+        $util.toJson($ctx.result)
+
+  SKUListFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties:
+      ApiId: 
+        Ref: ApiId
+      DataSourceName: 
+        Ref: FDHSKUsDataSource
+      Name: SKUListFunction
+      FunctionVersion: 2018-05-29
+      RequestMappingTemplate: |
+        #set($productId = $context.arguments.productId)
+        #set($variantId = $context.arguments.variantId)
+        #set($nextToken = $context.arguments.nextToken)
+        {
+            "operation" : "Query",
+            "index": "productId-variantId-index",
+            "query" : {
+                ## Provide a query expression. **
+                "expression": "productId = :id AND variantId = :vId",
+                "expressionValues" : {
+                    ":id" : $util.dynamodb.toDynamoDBJson($productId),
+                    ":vId": $util.dynamodb.toDynamoDBJson($variantId)
+                }
+            },
+            "nextToken": $util.toJson($util.defaultIfNullOrBlank($nextToken, null))
+        }
+      ResponseMappingTemplate: |
+        #if($ctx.error)
+          $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        #**
+            Scan and Query operations return a list of items and a nextToken. Pass them
+            to the client for use in pagination.
+        *#
+        {
+            "items": $util.toJson($ctx.result.items),
+            "nextToken": $util.toJson($util.defaultIfNullOrBlank($context.result.nextToken, null))
+        }
+  MutationAuthenticationFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties:
+      ApiId: 
+        Ref: ApiId
+      DataSourceName: 
+        Ref: FDHUserTableDataSource
+      Name: MutationAuthenticationFunction
+      FunctionVersion: 2018-05-29
+      RequestMappingTemplate: |
+       {
+            "operation": "GetItem",
+            "key": {
+                "userId": $util.dynamodb.toDynamoDBJson($ctx.identity.sub),
+            }
+        }
+      ResponseMappingTemplate: |
+        #set($userPermissions = $context.result.userPermissions)
+        #set($hasPremissions = false)
+
+        #foreach( $permission in $userPermissions)
+          #if( $permission.resourceId == "*" && $permission.resourceType == "GLOBAL" )
+              #set($hasPremissions = true) 
+            #end
+        #end
+
+        #if( $hasPremissions )
+            $util.toJson($context.result)
+            #else
+            $util.unauthorized()
+        #end
+        
+  AuthenticationFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties:
+      ApiId: 
+        Ref: ApiId
+      DataSourceName: 
+        Ref: FDHUserTableDataSource
+      Name: AuthenticateUserFunction
+      FunctionVersion: 2018-05-29
+      RequestMappingTemplate: |
+       {
+          "operation": "GetItem",
+          "key": {
+          "userId": $util.dynamodb.toDynamoDBJson($ctx.identity.sub),
+          }
+        } 
+      ResponseMappingTemplate: |
+        ## Raise a GraphQL field error in case of a datasource invocation error
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        ## store userPremissions for re-use in other functions
+        $util.qr($ctx.stash.put("userPermissions", $ctx.result.userPermissions))
+        $util.toJson($ctx.result)       
+
+  ResolverNestedStack:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: resolvers.yaml
+      Parameters:
+        ApiId:
+          Ref: ApiId
+        AuthenticationFunction:
+          Fn::GetAtt: [AuthenticationFunction, FunctionId]
+        PublishSKUVersionFunction:
+          Fn::GetAtt: [PublishSKUVersionFunction, FunctionId]
+        SKUFunction:
+          Fn::GetAtt: [SKUFunction, FunctionId]
+        SKUListFunction:
+          Fn::GetAtt: [SKUListFunction, FunctionId]
+        MutationAuthenticationFunction:
+          Fn::GetAtt: [MutationAuthenticationFunction, FunctionId]
